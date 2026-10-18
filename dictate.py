@@ -49,6 +49,8 @@ def load_config():
         "beam_size": config.getint("whisper", "beam_size", fallback=5),
         "key": config.get("hotkey", "key", fallback="rightctrl"),
         "min_hold": config.getfloat("hotkey", "min_hold", fallback=0.25),
+        "mode": config.get("hotkey", "mode", fallback="hold").strip().lower(),
+        "long_press": config.getfloat("behavior", "long_press", fallback=0.4),
         "auto_type": config.getboolean("behavior", "auto_type", fallback=True),
         "trailing_space": config.getboolean("behavior", "trailing_space", fallback=True),
         "type_delay_ms": config.getfloat("behavior", "type_delay_ms", fallback=4),
@@ -193,7 +195,9 @@ class Recorder:
 
 class State(Enum):
     IDLE = "idle"
-    RECORDING = "recording"
+    RECORDING = "recording"  # hotkey held
+    TOGGLED = "toggled"      # toggle mode: tapped, recording hands-free
+    STOPPING = "stopping"    # toggle mode: pressed again, stops on release
     BUSY = "busy"
 
 
@@ -236,11 +240,16 @@ class Dictation:
         self.model_loaded.set()
         print("Model loaded. Ready for dictation!")
         print(f"Hold [{CONFIG['key']}] to record, release to transcribe.")
+        if CONFIG["mode"] == "toggle":
+            print(f"Or tap [{CONFIG['key']}] to start, tap again to stop.")
 
     # ---- hotkey callbacks (listener thread) ------------------------------
 
     def on_press(self):
         with self.lock:
+            if self.state is State.TOGGLED:
+                self.state = State.STOPPING
+                return
             if self.state is not State.IDLE:
                 return
             if self.model_error:
@@ -257,16 +266,17 @@ class Dictation:
             # Only show the overlay once it's clearly a hold, not a tap or Ctrl+X
             self.show_timer = threading.Timer(CONFIG["min_hold"], self._show_listening)
             self.show_timer.start()
-            self.watchdog = threading.Timer(MAX_RECORD_SECONDS, self.on_chord)
+            self.watchdog = threading.Timer(MAX_RECORD_SECONDS, self._timeout)
             self.watchdog.start()
 
     def _show_listening(self):
         with self.lock:
-            if self.state is not State.RECORDING:
+            if self.state not in (State.RECORDING, State.TOGGLED):
                 return
+            how = "Release" if self.state is State.RECORDING else "Tap"
             print("Recording...")
             self.overlay.set_state("listening")
-        notify("Recording...", f"Release {CONFIG['key']} when done",
+        notify("Recording...", f"{how} {CONFIG['key']} when done",
                "audio-input-microphone", 30000)
 
     def _cancel_timers(self):
@@ -278,16 +288,34 @@ class Dictation:
         with self.lock:
             if self.state is State.RECORDING:
                 self._cancel()
+            elif self.state is State.STOPPING:
+                self.state = State.TOGGLED  # it was a shortcut, keep recording
+
+    def _timeout(self):
+        with self.lock:
+            if self.state in (State.RECORDING, State.TOGGLED, State.STOPPING):
+                print(f"Recording passed {MAX_RECORD_SECONDS}s, discarding")
+                self._cancel()
 
     def on_release(self):
         with self.lock:
-            if self.state is not State.RECORDING:
+            if self.state is State.RECORDING:
+                held = time.monotonic() - self.press_time
+                if CONFIG["mode"] == "toggle" and held < CONFIG["long_press"]:
+                    self.state = State.TOGGLED  # a tap: keep recording until the next one
+                    self.show_timer.cancel()
+                elif held < CONFIG["min_hold"]:
+                    self._cancel()
+                    return
+            elif self.state is not State.STOPPING:
                 return
-            if time.monotonic() - self.press_time < CONFIG["min_hold"]:
-                self._cancel()
-                return
-            self._cancel_timers()
-            self.state = State.BUSY
+            toggled = self.state is State.TOGGLED
+            if not toggled:
+                self._cancel_timers()
+                self.state = State.BUSY
+        if toggled:
+            self._show_listening()
+            return
         print("Transcribing...")
         self.overlay.set_state("transcribing")
         threading.Thread(target=self._finish, daemon=True).start()
@@ -421,6 +449,8 @@ def main():
 
     check_dependencies()
     hotkey = inputdev.resolve_key(CONFIG["key"])  # fail fast on a bad key name
+    if CONFIG["mode"] not in ("hold", "toggle"):
+        sys.exit(f"Unknown hotkey mode: {CONFIG['mode']} (use hold or toggle)")
 
     keyboard = None
     if CONFIG["auto_type"]:

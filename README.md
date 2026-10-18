@@ -28,6 +28,7 @@ Try the overlay without a microphone: `.venv/bin/python dictate.py --demo-overla
 - [uv](https://docs.astral.sh/uv/)
 - Linux with X11 or Wayland (ALSA/PipeWire audio)
 - Membership in the `input` group, plus `/dev/uinput` access (the installer sets both up)
+  - Note: this lets any program running as you read keyboard input and inject keystrokes. Wayland offers no portable alternative for global hotkeys + typing.
 
 ## Supported Distros
 
@@ -77,6 +78,7 @@ With `--extra gpu`, `nvidia-cublas-cu12` and `nvidia-cudnn-cu12` are installed i
 - Hold **Right Ctrl** to record (the overlay shows *Listening* with a level meter)
 - Release to transcribe (*Transcribing* spinner) → copies to clipboard and types into active input
 - Pressing another key while holding (e.g. Ctrl+C), or a tap shorter than `min_hold`, cancels
+- Prefer hands-free? Set `mode = toggle` under `[hotkey]`: a quick tap starts recording, another tap stops it (holding still works)
 - Press **Ctrl+C** to quit (when running manually)
 
 ## Run as a systemd Service
