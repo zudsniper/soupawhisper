@@ -2,11 +2,20 @@
 
 A simple push-to-talk voice dictation tool for Linux using faster-whisper. Hold a key to record, release to transcribe, and it automatically copies to clipboard and types into the active input.
 
+This fork adds:
+- **Wayland support** (tested on GNOME 49): the hotkey is read with evdev and text is typed through a uinput virtual keyboard, so it works in every app on X11 and Wayland, terminals included.
+- **On-screen overlay**: a small pill at the bottom of the screen that pulses with a live mic meter while you hold the key, spins while transcribing, then flashes the result. It never takes focus away from the field you're typing in.
+- **Hold-only Right Ctrl** by default, with a chord guard: Right Ctrl+C and other shortcuts don't trigger dictation, and quick taps are ignored.
+- GPU by default (`large-v3-turbo`) using pip-installed CUDA/cuDNN wheels, no system cuDNN needed. Falls back to `small.en` on CPU.
+
+Try the overlay without a microphone: `.venv/bin/python dictate.py --demo-overlay`
+
 ## Requirements
 
-- Python 3.10+
-- Poetry
-- Linux with X11 (ALSA audio)
+- Python 3.10+ (the system `/usr/bin/python3`, for PyGObject and evdev)
+- [uv](https://docs.astral.sh/uv/)
+- Linux with X11 or Wayland (ALSA/PipeWire audio)
+- Membership in the `input` group, plus `/dev/uinput` access (the installer sets both up)
 
 ## Supported Distros
 
@@ -18,7 +27,7 @@ A simple push-to-talk voice dictation tool for Linux using faster-whisper. Hold 
 ## Installation
 
 ```bash
-git clone https://github.com/ksred/soupawhisper.git
+git clone https://github.com/zudsniper/soupawhisper.git
 cd soupawhisper
 chmod +x install.sh
 ./install.sh
@@ -27,51 +36,35 @@ chmod +x install.sh
 The installer will:
 1. Detect your package manager
 2. Install system dependencies
-3. Install Python dependencies via Poetry
-4. Set up the config file
-5. Optionally install as a systemd service
+3. Add a udev rule for `/dev/uinput` and add you to the `input` group (**log out and back in afterwards**)
+4. Create `.venv` with uv and install Python dependencies (CUDA wheels if an NVIDIA GPU is found)
+5. Set up the config file
+6. Optionally install as a systemd service
 
 ### Manual Installation
 
 ```bash
 # Ubuntu/Debian
-sudo apt install alsa-utils xclip xdotool libnotify-bin
+sudo apt install alsa-utils libnotify-bin python3-gi python3-gi-cairo gir1.2-gtk-3.0 python3-evdev
 
-# Fedora
-sudo dnf install alsa-utils xclip xdotool libnotify
-
-# Arch
-sudo pacman -S alsa-utils xclip xdotool libnotify
-
-# Then install Python deps
-poetry install
+# Python deps (drop --extra gpu on machines without an NVIDIA GPU)
+uv venv --python /usr/bin/python3 --system-site-packages .venv
+uv pip install --python .venv/bin/python -r pyproject.toml --extra gpu
 ```
 
-### GPU Support (Optional)
+### GPU Support
 
-For NVIDIA GPU acceleration, install cuDNN 9:
-
-```bash
-wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
-sudo dpkg -i cuda-keyring_1.1-1_all.deb
-sudo apt update
-sudo apt install libcudnn9-cuda-12
-```
-
-Then edit `~/.config/soupawhisper/config.ini`:
-```ini
-device = cuda
-compute_type = float16 (or float32)
-```
+With `--extra gpu`, `nvidia-cublas-cu12` and `nvidia-cudnn-cu12` are installed into the venv and `dictate.py` points the loader at them on startup. Without a GPU, set `device = cpu` and `compute_type = int8` in the config.
 
 ## Usage
 
 ```bash
-poetry run python dictate.py
+.venv/bin/python dictate.py
 ```
 
-- Hold **F12** to record
-- Release to transcribe → copies to clipboard and types into active input
+- Hold **Right Ctrl** to record (the overlay shows *Listening* with a level meter)
+- Release to transcribe (*Transcribing* spinner) → copies to clipboard and types into active input
+- Pressing another key while holding (e.g. Ctrl+C), or a tap shorter than `min_hold`, cancels
 - Press **Ctrl+C** to quit (when running manually)
 
 ## Run as a systemd Service
@@ -94,30 +87,7 @@ journalctl --user -u soupawhisper -f    # View logs
 
 ## Configuration
 
-Edit `~/.config/soupawhisper/config.ini`:
-
-```ini
-[whisper]
-# Model size: tiny.en, base.en, small.en, medium.en, large-v3
-model = base.en
-
-# Device: cpu or cuda (cuda requires cuDNN)
-device = cpu
-
-# Compute type: int8 for CPU, float16 (or float32) for GPU
-compute_type = int8
-
-[hotkey]
-# Key to hold for recording: f12, scroll_lock, pause, etc.
-key = f12
-
-[behavior]
-# Type text into active input field
-auto_type = true
-
-# Show desktop notification
-notifications = true
-```
+Edit `~/.config/soupawhisper/config.ini`. See [`config.example.ini`](config.example.ini) for every option: model, device, language, hotkey, `min_hold`, auto-type, overlay position.
 
 Create the config directory and file if it doesn't exist:
 ```bash
@@ -136,11 +106,19 @@ arecord -l
 arecord -d 3 test.wav && aplay test.wav
 ```
 
-**Permission issues with keyboard:**
+**Hotkey does nothing / "No readable keyboard found":**
 ```bash
-sudo usermod -aG input $USER
-# Then log out and back in
+id -nG | grep -w input   # must list 'input'; log out and in after install.sh
 ```
+
+**Auto-type disabled, cannot open /dev/uinput:**
+```bash
+ls -l /dev/uinput        # should be group 'input', mode crw-rw----
+```
+
+**"fn" can't be used as the hotkey:** on most keyboards fn is handled by the keyboard firmware and never reaches the OS.
+
+**Typed characters are wrong:** auto-type assumes a US keyboard layout. The clipboard always has the exact text.
 
 **cuDNN errors with GPU:**
 ```

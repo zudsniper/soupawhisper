@@ -1,11 +1,11 @@
-[tool.poetry]
+[project]
 name = "soupawhisper"
-version = "0.1.0"
-description = "Push-to-talk voice dictation for Linux using faster-whisper"
-authors = ["Kyle <kyle@ksred.com>"]
+version = "0.2.0"
+description = "Push-to-talk voice dictation for Linux (X11 + Wayland) using faster-whisper"
+authors = [{ name = "Kyle", email = "kyle@ksred.com" }]
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/ksred/soupawhisper"
+requires-python = ">=3.10"
 keywords = ["whisper", "dictation", "voice", "transcription", "speech-to-text"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -13,18 +13,21 @@ classifiers = [
     "Intended Audience :: End Users/Desktop",
     "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX :: Linux",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
     "Topic :: Multimedia :: Sound/Audio :: Speech",
 ]
-package-mode = false
+# PyGObject (gi) and evdev come from the system packages python3-gi and
+# python3-evdev; the venv is created with --system-site-packages.
+dependencies = [
+    "faster-whisper>=1.1.0",
+    "numpy",
+    "av<16",  # faster-whisper 1.2 passes metadata_errors, removed in PyAV 16+
+]
 
-[tool.poetry.dependencies]
-python = "^3.10"
-faster-whisper = "^1.0.0"
-pynput = "^1.7.6"
+[project.optional-dependencies]
+gpu = [
+    "nvidia-cublas-cu12",
+    "nvidia-cudnn-cu12==9.*",
+]
 
-[build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+[project.urls]
+Repository = "https://github.com/zudsniper/soupawhisper"

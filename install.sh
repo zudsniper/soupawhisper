@@ -1,5 +1,5 @@
 #!/bin/bash
-# Install SoupaWhisper on Linux
+# Install SoupaWhisper on Linux (X11 or Wayland)
 # Supports: Ubuntu, Pop!_OS, Debian, Fedora, Arch
 
 set -e
@@ -7,6 +7,11 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_DIR="$HOME/.config/soupawhisper"
 SERVICE_DIR="$HOME/.config/systemd/user"
+UDEV_RULE="/etc/udev/rules.d/80-soupawhisper-uinput.rules"
+
+has_nvidia() {
+    command -v nvidia-smi &> /dev/null && nvidia-smi -L &> /dev/null
+}
 
 # Detect package manager
 detect_package_manager() {
@@ -23,7 +28,7 @@ detect_package_manager() {
     fi
 }
 
-# Install system dependencies
+# Install system dependencies (GTK/evdev bindings come from the distro)
 install_deps() {
     local pm=$(detect_package_manager)
 
@@ -32,23 +37,43 @@ install_deps() {
 
     case $pm in
         apt)
-            sudo apt update
-            sudo apt install -y alsa-utils xclip xdotool libnotify-bin
+            sudo apt update || echo "apt update had errors, continuing with cached package lists"
+            sudo apt install -y alsa-utils libnotify-bin python3-gi python3-gi-cairo \
+                gir1.2-gtk-3.0 python3-evdev
             ;;
         dnf)
-            sudo dnf install -y alsa-utils xclip xdotool libnotify
+            sudo dnf install -y alsa-utils libnotify python3-gobject gtk3 python3-evdev
             ;;
         pacman)
-            sudo pacman -S --noconfirm alsa-utils xclip xdotool libnotify
+            sudo pacman -S --noconfirm alsa-utils libnotify python-gobject python-cairo gtk3 python-evdev
             ;;
         zypper)
-            sudo zypper install -y alsa-utils xclip xdotool libnotify-tools
+            sudo zypper install -y alsa-utils libnotify-tools python3-gobject python3-gobject-cairo \
+                typelib-1_0-Gtk-3_0 python3-evdev
             ;;
         *)
             echo "Unknown package manager. Please install manually:"
-            echo "  alsa-utils xclip xdotool libnotify"
+            echo "  alsa-utils libnotify PyGObject (GTK 3) pycairo python-evdev"
             ;;
     esac
+}
+
+# Let the user read keyboards and create a virtual keyboard
+setup_input_permissions() {
+    echo ""
+    echo "Setting up keyboard access (input group + /dev/uinput)..."
+
+    echo 'KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"' \
+        | sudo tee "$UDEV_RULE" > /dev/null
+    echo uinput | sudo tee /etc/modules-load.d/soupawhisper-uinput.conf > /dev/null
+    sudo modprobe uinput
+    sudo udevadm control --reload-rules
+    sudo udevadm trigger --name-match=uinput
+
+    if ! id -nG "$USER" | grep -qw input; then
+        sudo usermod -aG input "$USER"
+        echo "Added $USER to the 'input' group. Log out and back in for it to apply."
+    fi
 }
 
 # Install Python dependencies
@@ -56,13 +81,20 @@ install_python() {
     echo ""
     echo "Installing Python dependencies..."
 
-    if ! command -v poetry &> /dev/null; then
-        echo "Poetry not found. Please install Poetry first:"
-        echo "  curl -sSL https://install.python-poetry.org | python3 -"
+    if ! command -v uv &> /dev/null; then
+        echo "uv not found. Please install uv first:"
+        echo "  curl -LsSf https://astral.sh/uv/install.sh | sh"
         exit 1
     fi
 
-    poetry install
+    # System site-packages provide gi (PyGObject) and evdev
+    uv venv --allow-existing --python /usr/bin/python3 --system-site-packages "$SCRIPT_DIR/.venv"
+
+    if has_nvidia; then
+        uv pip install --python "$SCRIPT_DIR/.venv/bin/python" -r "$SCRIPT_DIR/pyproject.toml" --extra gpu
+    else
+        uv pip install --python "$SCRIPT_DIR/.venv/bin/python" -r "$SCRIPT_DIR/pyproject.toml"
+    fi
 }
 
 # Setup config file
@@ -73,6 +105,11 @@ setup_config() {
 
     if [ ! -f "$CONFIG_DIR/config.ini" ]; then
         cp "$SCRIPT_DIR/config.example.ini" "$CONFIG_DIR/config.ini"
+        if ! has_nvidia; then
+            sed -i -e 's/^model = .*/model = small.en/' \
+                -e 's/^device = .*/device = cpu/' \
+                -e 's/^compute_type = .*/compute_type = int8/' "$CONFIG_DIR/config.ini"
+        fi
         echo "Created config at $CONFIG_DIR/config.ini"
     else
         echo "Config already exists at $CONFIG_DIR/config.ini"
@@ -86,35 +123,24 @@ install_service() {
 
     mkdir -p "$SERVICE_DIR"
 
-    # Get current display settings
-    local display="${DISPLAY:-:0}"
-    local xauthority="${XAUTHORITY:-$HOME/.Xauthority}"
-    local venv_path="$SCRIPT_DIR/.venv"
-
-    # Check if venv exists
-    if [ ! -d "$venv_path" ]; then
-        venv_path=$(poetry env info --path 2>/dev/null || echo "$SCRIPT_DIR/.venv")
-    fi
-
-    cat > "$SERVICE_DIR/soupawhisper.service" << EOF
+    # No DISPLAY/WAYLAND_DISPLAY here: the desktop session exports them to the
+    # user manager (X auth paths are random per login on GNOME Wayland).
+    cat > "$SERVICE_DIR/soupawhisper.service" << EOF2
 [Unit]
 Description=SoupaWhisper Voice Dictation
+PartOf=graphical-session.target
 After=graphical-session.target
 
 [Service]
 Type=simple
 WorkingDirectory=$SCRIPT_DIR
-ExecStart=$venv_path/bin/python $SCRIPT_DIR/dictate.py
+ExecStart=$SCRIPT_DIR/.venv/bin/python -u $SCRIPT_DIR/dictate.py
 Restart=on-failure
 RestartSec=5
 
-# X11 display access
-Environment=DISPLAY=$display
-Environment=XAUTHORITY=$xauthority
-
 [Install]
-WantedBy=default.target
-EOF
+WantedBy=graphical-session.target
+EOF2
 
     echo "Created service at $SERVICE_DIR/soupawhisper.service"
 
@@ -138,6 +164,7 @@ main() {
     echo ""
 
     install_deps
+    setup_input_permissions
     install_python
     setup_config
 
@@ -155,10 +182,10 @@ main() {
     echo "==================================="
     echo ""
     echo "To run manually:"
-    echo "  poetry run python dictate.py"
+    echo "  .venv/bin/python dictate.py"
     echo ""
     echo "Config: $CONFIG_DIR/config.ini"
-    echo "Hotkey: F12 (hold to record)"
+    echo "Hotkey: Right Ctrl (hold to record)"
     echo "Exit:   Ctrl+C"
 }
 
