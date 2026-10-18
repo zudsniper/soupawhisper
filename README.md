@@ -2,13 +2,25 @@
 
 A simple push-to-talk voice dictation tool for Linux using faster-whisper. Hold a key to record, release to transcribe, and it automatically copies to clipboard and types into the active input.
 
+<p align="center"><img src="docs/overlay-flow.gif" alt="Overlay: listening with a live mic meter, transcribing, then the result" width="520"></p>
+
 This fork adds:
 - **Wayland support** (tested on GNOME 49): the hotkey is read with evdev and text is typed through a uinput virtual keyboard, so it works in every app on X11 and Wayland, terminals included.
 - **On-screen overlay**: a small pill at the bottom of the screen that pulses with a live mic meter while you hold the key, spins while transcribing, then flashes the result. It never takes focus away from the field you're typing in.
 - **Hold-only Right Ctrl** by default, with a chord guard: Right Ctrl+C and other shortcuts don't trigger dictation, and quick taps are ignored.
 - GPU by default (`large-v3-turbo`) using pip-installed CUDA/cuDNN wheels, no system cuDNN needed. Falls back to `small.en` on CPU.
 
-Try the overlay without a microphone: `.venv/bin/python dictate.py --demo-overlay`
+### Overlay states
+
+| State | Looks like | When |
+|-------|-----------|------|
+| Listening | <img src="docs/overlay-listening.gif" width="300" alt="Listening"> | While the hotkey is held (after `min_hold`). The dot and bars follow your mic level. |
+| Transcribing | <img src="docs/overlay-transcribing.gif" width="300" alt="Transcribing"> | After release, while Whisper runs. |
+| Done | <img src="docs/overlay-done.gif" width="300" alt="Done"> | Text copied and typed; shows the start of it, then fades. |
+| No speech | <img src="docs/overlay-nospeech.png" width="300" alt="No speech detected"> | Recording was silent or too short. |
+| Error | <img src="docs/overlay-error.png" width="300" alt="Error"> | Something failed (details in the service log). |
+
+Try the overlay without a microphone: `.venv/bin/python dictate.py --demo-overlay`. Disable it with `enabled = false` under `[overlay]`. The images above are rendered from the real drawing code by [`docs/render_overlay.py`](docs/render_overlay.py).
 
 ## Requirements
 
@@ -124,7 +136,7 @@ ls -l /dev/uinput        # should be group 'input', mode crw-rw----
 ```
 Unable to load any of {libcudnn_ops.so.9...}
 ```
-Install cuDNN 9 (see GPU Support section above) or switch to CPU mode.
+Install the venv with `--extra gpu` (see GPU Support section above) or switch to CPU mode.
 
 ## Model Sizes
 
@@ -135,5 +147,6 @@ Install cuDNN 9 (see GPU Support section above) or switch to CPU mode.
 | small.en | ~500MB | Medium | Better |
 | medium.en | ~1.5GB | Slower | Great |
 | large-v3 | ~3GB | Slowest | Best |
+| large-v3-turbo | ~1.6GB | Fast on GPU | Near large-v3 |
 
-For dictation, `base.en` or `small.en` is usually the sweet spot.
+On CPU, `base.en` or `small.en` is usually the sweet spot. With an NVIDIA GPU, `large-v3-turbo` (the default) transcribes a few seconds of speech in well under a second.
