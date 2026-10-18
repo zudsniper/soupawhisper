@@ -73,6 +73,8 @@ setup_input_permissions() {
     if ! id -nG "$USER" | grep -qw input; then
         sudo usermod -aG input "$USER"
         echo "Added $USER to the 'input' group. Log out and back in for it to apply."
+        echo "Note: programs running as $USER can now read all keyboard input and"
+        echo "inject keystrokes. That access is what push-to-talk needs."
     fi
 }
 
@@ -134,7 +136,7 @@ After=graphical-session.target
 [Service]
 Type=simple
 WorkingDirectory=$SCRIPT_DIR
-ExecStart=$SCRIPT_DIR/.venv/bin/python -u $SCRIPT_DIR/dictate.py
+ExecStart="$SCRIPT_DIR/.venv/bin/python" -u "$SCRIPT_DIR/dictate.py"
 Restart=on-failure
 RestartSec=5
 

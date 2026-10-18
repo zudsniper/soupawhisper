@@ -31,6 +31,7 @@ __version__ = "0.2.0"
 # Load configuration
 CONFIG_PATH = Path.home() / ".config" / "soupawhisper" / "config.ini"
 SAMPLE_RATE = 16000
+MAX_RECORD_SECONDS = 120  # safety net if a key-up is ever lost
 FALLBACK_MODEL = ("small.en", "cpu", "int8")
 
 
@@ -91,6 +92,13 @@ def notify(title, message, icon="dialog-information", timeout=2000):
     """Send a desktop notification."""
     if not CONFIG["notifications"]:
         return
+    try:
+        _notify_send(title, message, icon, timeout)
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"notify-send failed: {e}")
+
+
+def _notify_send(title, message, icon, timeout):
     subprocess.run(
         [
             "notify-send",
@@ -101,7 +109,8 @@ def notify(title, message, icon="dialog-information", timeout=2000):
             title,
             message
         ],
-        capture_output=True
+        capture_output=True,
+        timeout=2,
     )
 
 
@@ -170,7 +179,11 @@ class Recorder:
             time.sleep(tail)
         process, self.process = self.process, None
         process.terminate()
-        process.wait()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
         self.thread.join(timeout=1)
         process.stdout.close()
         raw = b"".join(self.chunks)
@@ -196,6 +209,7 @@ class Dictation:
         self.state = State.IDLE
         self.press_time = 0.0
         self.show_timer = None
+        self.watchdog = None
 
         # Load model in background
         threading.Thread(target=self._load_model, daemon=True).start()
@@ -232,20 +246,33 @@ class Dictation:
             if self.model_error:
                 self.overlay.set_state("error", "model failed to load")
                 return
+            try:
+                self.recorder.start()  # start now so the first word isn't clipped
+            except OSError as e:
+                print(f"Cannot start arecord: {e}")
+                self.overlay.set_state("error", "cannot open microphone")
+                return
             self.state = State.RECORDING
             self.press_time = time.monotonic()
-            self.recorder.start()  # start now so the first word isn't clipped
             # Only show the overlay once it's clearly a hold, not a tap or Ctrl+X
             self.show_timer = threading.Timer(CONFIG["min_hold"], self._show_listening)
             self.show_timer.start()
+            self.watchdog = threading.Timer(MAX_RECORD_SECONDS, self.on_chord)
+            self.watchdog.start()
 
     def _show_listening(self):
         with self.lock:
-            if self.state is State.RECORDING:
-                print("Recording...")
-                self.overlay.set_state("listening")
-                notify("Recording...", f"Release {CONFIG['key']} when done",
-                       "audio-input-microphone", 30000)
+            if self.state is not State.RECORDING:
+                return
+            print("Recording...")
+            self.overlay.set_state("listening")
+        notify("Recording...", f"Release {CONFIG['key']} when done",
+               "audio-input-microphone", 30000)
+
+    def _cancel_timers(self):
+        for timer in (self.show_timer, self.watchdog):
+            if timer is not None:
+                timer.cancel()
 
     def on_chord(self):
         with self.lock:
@@ -259,16 +286,16 @@ class Dictation:
             if time.monotonic() - self.press_time < CONFIG["min_hold"]:
                 self._cancel()
                 return
-            self.show_timer.cancel()
+            self._cancel_timers()
             self.state = State.BUSY
         print("Transcribing...")
         self.overlay.set_state("transcribing")
-        notify("Transcribing...", "Processing your speech", "emblem-synchronizing", 30000)
         threading.Thread(target=self._finish, daemon=True).start()
+        notify("Transcribing...", "Processing your speech", "emblem-synchronizing", 30000)
 
     def _cancel(self):
         """Discard the current recording. Caller holds self.lock."""
-        self.show_timer.cancel()
+        self._cancel_timers()
         self.recorder.stop()
         self.state = State.IDLE
         self.overlay.set_state("hidden")
@@ -307,7 +334,7 @@ class Dictation:
         # Type it into the active input field
         if self.keyboard:
             self.keyboard.type(text + (" " if CONFIG["trailing_space"] else ""))
-        print(f"Copied: {text}")
+        print(f"Copied {len(text)} characters")  # never log the dictated text itself
         self.overlay.set_state("done", text)
         notify("Copied!", text[:100] + ("..." if len(text) > 100 else ""), "emblem-ok-symbolic", 3000)
 
@@ -393,6 +420,7 @@ def main():
         return
 
     check_dependencies()
+    hotkey = inputdev.resolve_key(CONFIG["key"])  # fail fast on a bad key name
 
     keyboard = None
     if CONFIG["auto_type"]:
@@ -404,7 +432,7 @@ def main():
 
     dictation = Dictation(overlay, keyboard)
     inputdev.HotkeyListener(
-        inputdev.resolve_key(CONFIG["key"]),
+        hotkey,
         on_press=dictation.on_press,
         on_release=dictation.on_release,
         on_chord=dictation.on_chord,

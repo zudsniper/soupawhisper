@@ -60,13 +60,16 @@ class HotkeyListener:
         for path in evdev.list_devices():
             if path in self.devices:
                 continue
+            dev = None
             try:
                 dev = evdev.InputDevice(path)
-            except OSError:
-                continue
-            keys = dev.capabilities().get(ecodes.EV_KEY, [])
-            if dev.name == VIRTUAL_KEYBOARD_NAME or self.keycode not in keys:
-                dev.close()
+                keys = dev.capabilities().get(ecodes.EV_KEY, [])
+                if dev.name == VIRTUAL_KEYBOARD_NAME or self.keycode not in keys:
+                    dev.close()
+                    continue
+            except OSError:  # vanished mid-probe
+                if dev is not None:
+                    dev.close()
                 continue
             self.devices[path] = dev
             self.selector.register(dev, selectors.EVENT_READ)
@@ -79,8 +82,18 @@ class HotkeyListener:
             dev.close()
         except OSError:
             pass
+        self._lost_release()
+
+    def _lost_release(self):
+        """A key-up we may never see (unplug, dropped events): treat as a chord/cancel."""
+        if self.held:
+            self.held = False
+            self.on_chord()
 
     def _handle(self, event):
+        if event.type == ecodes.EV_SYN and event.code == ecodes.SYN_DROPPED:
+            self._lost_release()
+            return
         if event.type != ecodes.EV_KEY or event.value == 2:  # ignore autorepeat
             return
         if event.code == self.keycode:
@@ -99,21 +112,30 @@ class HotkeyListener:
             print("No readable keyboard found. Is your user in the 'input' group?")
         last_scan = time.monotonic()
         while True:
-            for key, _ in self.selector.select(timeout=RESCAN_INTERVAL):
-                dev = key.fileobj
+            try:
+                self._poll()
+                if time.monotonic() - last_scan >= RESCAN_INTERVAL:
+                    self._scan()
+                    last_scan = time.monotonic()
+            except Exception as e:  # keep listening no matter what
+                print(f"Hotkey listener error: {e}")
+                time.sleep(0.5)
+
+    def _poll(self):
+        for key, _ in self.selector.select(timeout=RESCAN_INTERVAL):
+            dev = key.fileobj
+            try:
+                events = list(dev.read())
+            except BlockingIOError:
+                continue
+            except OSError:  # unplugged
+                self._drop(dev)
+                continue
+            for event in events:
                 try:
-                    events = list(dev.read())
-                except OSError:  # unplugged
-                    self._drop(dev)
-                    continue
-                for event in events:
-                    try:
-                        self._handle(event)
-                    except Exception as e:  # keep listening no matter what
-                        print(f"Hotkey handler error: {e}")
-            if time.monotonic() - last_scan >= RESCAN_INTERVAL:
-                self._scan()
-                last_scan = time.monotonic()
+                    self._handle(event)
+                except Exception as e:
+                    print(f"Hotkey handler error: {e}")
 
     def start(self):
         threading.Thread(target=self.run, daemon=True).start()
@@ -177,10 +199,12 @@ class VirtualKeyboard:
             code, shift = KEYMAP[char]
             if shift:
                 self._emit(ecodes.KEY_LEFTSHIFT, 1)
-            self._emit(code, 1)
-            self._emit(code, 0)
-            if shift:
-                self._emit(ecodes.KEY_LEFTSHIFT, 0)
+            try:
+                self._emit(code, 1)
+                self._emit(code, 0)
+            finally:
+                if shift:
+                    self._emit(ecodes.KEY_LEFTSHIFT, 0)
             time.sleep(self.delay)
 
     def close(self):
