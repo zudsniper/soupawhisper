@@ -342,6 +342,8 @@ class Dictation:
     def _finish(self):
         try:
             audio = self.recorder.stop(tail=0.15)
+            peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+            print(f"Captured {audio.size / SAMPLE_RATE:.1f}s, peak {20 * math.log10(peak + 1e-7):.0f} dBFS")
 
             # Wait for model if not loaded yet
             self.model_loaded.wait()
