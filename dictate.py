@@ -126,7 +126,16 @@ def load_model(name, device, compute_type):
     return model
 
 
+def normalize(audio, target=0.5, max_gain=20.0):
+    """Boost quiet mics (e.g. dynamic mics at low gain) so the VAD doesn't drop speech."""
+    peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+    if peak <= 0.0:
+        return audio
+    return audio * min(max_gain, max(1.0, target / peak))
+
+
 def transcribe(model, audio):
+    audio = normalize(audio)
     segments, _ = model.transcribe(
         audio,
         beam_size=CONFIG["beam_size"],

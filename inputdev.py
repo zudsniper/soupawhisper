@@ -55,6 +55,7 @@ class HotkeyListener:
         self.held = False
         self.selector = selectors.DefaultSelector()
         self.devices = {}
+        self.denied = set()
 
     def _scan(self):
         for path in evdev.list_devices():
@@ -67,10 +68,16 @@ class HotkeyListener:
                 if dev.name == VIRTUAL_KEYBOARD_NAME or self.keycode not in keys:
                     dev.close()
                     continue
+            except PermissionError:
+                if path not in self.denied:
+                    self.denied.add(path)
+                    print(f"No permission to read {path}. Is your user in the 'input' group?")
+                continue
             except OSError:  # vanished mid-probe
                 if dev is not None:
                     dev.close()
                 continue
+            self.denied.discard(path)
             self.devices[path] = dev
             self.selector.register(dev, selectors.EVENT_READ)
             print(f"Listening on {dev.name} ({path})")

@@ -127,6 +127,8 @@ install_service() {
 
     # No DISPLAY/WAYLAND_DISPLAY here: the desktop session exports them to the
     # user manager (X auth paths are random per login on GNOME Wayland).
+    # sg gives the service the input group even before the user logs out and
+    # back in, so a keyboard that reconnects can still be reopened.
     cat > "$SERVICE_DIR/soupawhisper.service" << EOF2
 [Unit]
 Description=SoupaWhisper Voice Dictation
@@ -136,7 +138,7 @@ After=graphical-session.target
 [Service]
 Type=simple
 WorkingDirectory=$SCRIPT_DIR
-ExecStart="$SCRIPT_DIR/.venv/bin/python" -u "$SCRIPT_DIR/dictate.py"
+ExecStart=/usr/bin/sg input -c "exec '$SCRIPT_DIR/.venv/bin/python' -u '$SCRIPT_DIR/dictate.py'"
 Restart=on-failure
 RestartSec=5
 
