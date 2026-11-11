@@ -1,16 +1,84 @@
 #!/bin/bash
 # Install SoupaWhisper on Linux (X11 or Wayland)
-# Supports: Ubuntu, Pop!_OS, Debian, Fedora, Arch
+# Supports: Ubuntu, Pop!_OS, Debian, Fedora, Arch, openSUSE
+#
+#   ./install.sh              full install with a short setup guide
+#   ./install.sh --configure  only re-run the setup guide (hotkey, model, ...)
+#   ./install.sh --yes        full install with defaults, no questions
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_DIR="$HOME/.config/soupawhisper"
+CONFIG="$CONFIG_DIR/config.ini"
 SERVICE_DIR="$HOME/.config/systemd/user"
 UDEV_RULE="/etc/udev/rules.d/80-soupawhisper-uinput.rules"
+SYS_PYTHON=/usr/bin/python3
+
+ASSUME_YES=false
+CONFIGURE_ONLY=false
+for arg in "$@"; do
+    case $arg in
+        -y|--yes) ASSUME_YES=true ;;
+        -c|--configure) CONFIGURE_ONLY=true ;;
+        -h|--help) sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) echo "Unknown option: $arg (try --help)"; exit 1 ;;
+    esac
+done
+
+if [ -t 1 ]; then
+    BOLD=$'\e[1m'; DIM=$'\e[2m'; GREEN=$'\e[32m'; YELLOW=$'\e[33m'; RESET=$'\e[0m'
+else
+    BOLD=; DIM=; GREEN=; YELLOW=; RESET=
+fi
+
+step() { echo ""; echo "${BOLD}==> $*${RESET}"; }
+note() { echo "${DIM}    $*${RESET}"; }
+warn() { echo "${YELLOW}    $*${RESET}"; }
+
+abort() { echo ""; echo "Aborted."; exit 1; }
+
+# ask "Question" default -> answer in $REPLY
+ask() {
+    if $ASSUME_YES; then REPLY=$2; return; fi
+    read -r -p "    $1 [${2}]: " REPLY || abort
+    REPLY=${REPLY:-$2}
+}
+
+# confirm "Question" y|n -> exit status
+confirm() {
+    local hint="y/N"; [ "$2" = y ] && hint="Y/n"
+    if $ASSUME_YES; then [ "$2" = y ]; return; fi
+    read -r -p "    $1 [$hint]: " REPLY || abort
+    REPLY=${REPLY:-$2}
+    [[ $REPLY =~ ^[Yy] ]]
+}
+
+# choose "Question" default option... -> chosen option in $REPLY
+choose() {
+    local question=$1 default=$2; shift 2
+    local i=1 opt
+    echo "    $question"
+    for opt in "$@"; do
+        echo "      $i) $opt"
+        i=$((i + 1))
+    done
+    while true; do
+        ask "Choice" "$default"
+        if [[ $REPLY =~ ^[0-9]+$ ]] && [ "$REPLY" -ge 1 ] && [ "$REPLY" -le $# ]; then
+            REPLY=${!REPLY}
+            return
+        fi
+        echo "    Enter a number from 1 to $#."
+    done
+}
 
 has_nvidia() {
     command -v nvidia-smi &> /dev/null && nvidia-smi -L &> /dev/null
+}
+
+in_input_group_now() {
+    id -nG | grep -qw input
 }
 
 # Detect package manager
@@ -30,38 +98,37 @@ detect_package_manager() {
 
 # Install system dependencies (GTK/evdev bindings come from the distro)
 install_deps() {
-    local pm=$(detect_package_manager)
-
-    echo "Detected package manager: $pm"
-    echo "Installing system dependencies..."
+    local pm
+    pm=$(detect_package_manager)
+    step "Installing system packages (needs sudo; package manager: $pm)"
 
     case $pm in
         apt)
-            sudo apt update || echo "apt update had errors, continuing with cached package lists"
+            sudo apt update || warn "apt update had errors, continuing with cached package lists"
             sudo apt install -y alsa-utils libnotify-bin python3-gi python3-gi-cairo \
-                gir1.2-gtk-3.0 python3-evdev
+                gir1.2-gtk-3.0 python3-evdev curl
             ;;
         dnf)
-            sudo dnf install -y alsa-utils libnotify python3-gobject gtk3 python3-evdev
+            sudo dnf install -y alsa-utils libnotify python3-gobject gtk3 python3-evdev curl
             ;;
         pacman)
-            sudo pacman -S --noconfirm alsa-utils libnotify python-gobject python-cairo gtk3 python-evdev
+            sudo pacman -S --needed --noconfirm alsa-utils libnotify python-gobject python-cairo \
+                gtk3 python-evdev curl
             ;;
         zypper)
             sudo zypper install -y alsa-utils libnotify-tools python3-gobject python3-gobject-cairo \
-                typelib-1_0-Gtk-3_0 python3-evdev
+                typelib-1_0-Gtk-3_0 python3-evdev curl
             ;;
         *)
-            echo "Unknown package manager. Please install manually:"
-            echo "  alsa-utils libnotify PyGObject (GTK 3) pycairo python-evdev"
+            warn "Unknown package manager. Please install manually:"
+            warn "  alsa-utils libnotify PyGObject (GTK 3) pycairo python-evdev"
             ;;
     esac
 }
 
 # Let the user read keyboards and create a virtual keyboard
 setup_input_permissions() {
-    echo ""
-    echo "Setting up keyboard access (input group + /dev/uinput)..."
+    step "Setting up keyboard access (input group + /dev/uinput)"
 
     echo 'KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"' \
         | sudo tee "$UDEV_RULE" > /dev/null
@@ -72,56 +139,233 @@ setup_input_permissions() {
 
     if ! id -nG "$USER" | grep -qw input; then
         sudo usermod -aG input "$USER"
-        echo "Added $USER to the 'input' group. Log out and back in for it to apply."
-        echo "Note: programs running as $USER can now read all keyboard input and"
-        echo "inject keystrokes. That access is what push-to-talk needs."
+        note "Added $USER to the 'input' group."
     fi
+    note "Programs running as $USER can now read keyboard input and inject"
+    note "keystrokes. That access is what push-to-talk and auto-typing need."
 }
 
 # Install Python dependencies
 install_python() {
-    echo ""
-    echo "Installing Python dependencies..."
+    step "Installing Python dependencies"
 
+    if ! command -v uv &> /dev/null && [ -x "$HOME/.local/bin/uv" ]; then
+        export PATH="$HOME/.local/bin:$PATH"
+    fi
     if ! command -v uv &> /dev/null; then
-        echo "uv not found. Please install uv first:"
-        echo "  curl -LsSf https://astral.sh/uv/install.sh | sh"
-        exit 1
+        if confirm "uv (Python package manager) is not installed. Install it now?" y; then
+            curl -LsSf https://astral.sh/uv/install.sh | sh
+            export PATH="$HOME/.local/bin:$PATH"
+        else
+            echo "uv is required: https://docs.astral.sh/uv/"
+            exit 1
+        fi
     fi
 
     # System site-packages provide gi (PyGObject) and evdev
-    uv venv --allow-existing --python /usr/bin/python3 --system-site-packages "$SCRIPT_DIR/.venv"
+    uv venv --allow-existing --python "$SYS_PYTHON" --system-site-packages "$SCRIPT_DIR/.venv"
 
     if has_nvidia; then
+        note "NVIDIA GPU found: installing CUDA libraries too."
         uv pip install --python "$SCRIPT_DIR/.venv/bin/python" -r "$SCRIPT_DIR/pyproject.toml" --extra gpu
     else
         uv pip install --python "$SCRIPT_DIR/.venv/bin/python" -r "$SCRIPT_DIR/pyproject.toml"
     fi
 }
 
-# Setup config file
-setup_config() {
+# Wait for one key press on any keyboard and print its evdev name (e.g. rightctrl)
+DETECT_KEY_PY='
+import selectors, evdev
+from evdev import ecodes
+sel = selectors.DefaultSelector()
+for path in evdev.list_devices():
+    try:
+        dev = evdev.InputDevice(path)
+    except OSError:
+        continue
+    if ecodes.KEY_A in dev.capabilities().get(ecodes.EV_KEY, []):
+        sel.register(dev, selectors.EVENT_READ)
+if not sel.get_map():
+    raise SystemExit(1)
+while True:
+    for key, _ in sel.select():
+        for e in key.fileobj.read():
+            if e.type == ecodes.EV_KEY and e.value == 1:
+                name = ecodes.KEY.get(e.code)
+                name = name[0] if isinstance(name, list) else name
+                if name and name.startswith("KEY_"):
+                    print(name[4:].lower())
+                    raise SystemExit(0)
+'
+
+detect_key() {
+    if in_input_group_now; then
+        timeout 15 "$SYS_PYTHON" -c "$DETECT_KEY_PY"
+    else
+        # New group membership only applies after re-login; sg grants it now
+        DETECT_KEY_PY="$DETECT_KEY_PY" timeout 15 sg input -c "$SYS_PYTHON -c \"\$DETECT_KEY_PY\""
+    fi
+}
+
+valid_key() {
+    "$SYS_PYTHON" -c "import sys; from evdev import ecodes; sys.exit(0 if 'KEY_' + sys.argv[1].upper() in ecodes.ecodes else 1)" "$1" 2> /dev/null
+}
+
+# set_option section key value: replace "key = ..." inside [section] of $CONFIG
+set_option() {
+    "$SYS_PYTHON" - "$CONFIG" "$1" "$2" "$3" << 'PY'
+import re, sys
+path, section, key, value = sys.argv[1:]
+lines = open(path).read().splitlines(keepends=True)
+current, done = None, False
+for i, line in enumerate(lines):
+    m = re.match(r"\s*\[(.+)\]", line)
+    if m:
+        if current == section:
+            lines.insert(i, f"{key} = {value}\n")
+            done = True
+            break
+        current = m.group(1).strip()
+    elif current == section and re.match(rf"\s*{re.escape(key)}\s*=", line):
+        lines[i] = f"{key} = {value}\n"
+        done = True
+        break
+if not done:
+    if current != section:
+        lines.append(f"\n[{section}]\n")
+    lines.append(f"{key} = {value}\n")
+open(path, "w").writelines(lines)
+PY
+}
+
+choose_hotkey() {
     echo ""
-    echo "Setting up config..."
+    echo "  ${BOLD}1. Hotkey${RESET}: hold it while you speak, release to transcribe."
+    note "Pressing another key while holding it (e.g. Ctrl+C) cancels, so a"
+    note "modifier like Right Ctrl keeps working for shortcuts. Fn can't be used:"
+    note "on most keyboards it never reaches the computer."
+    local key
+    while true; do
+        choose "Which key?" 1 "Right Ctrl (recommended)" "Right Alt" "F12" "Scroll Lock" "Pause" \
+            "Press the key I want" "Type a key name"
+        case $REPLY in
+            Right\ Ctrl*) key=rightctrl ;;
+            Right\ Alt) key=rightalt ;;
+            F12) key=f12 ;;
+            Scroll\ Lock) key=scrolllock ;;
+            Pause) key=pause ;;
+            Press*)
+                echo "    Press the key now (15 s)..."
+                if key=$(detect_key) && [ -n "$key" ]; then
+                    echo "    Got: ${GREEN}$key${RESET}"
+                else
+                    warn "No key detected. Pick another option."
+                    continue
+                fi
+                ;;
+            Type*)
+                ask "evdev key name (e.g. rightmeta, f13, capslock)" "rightctrl"
+                key=$(echo "$REPLY" | tr '[:upper:]' '[:lower:]' | sed 's/^key_//')
+                ;;
+        esac
+        if valid_key "$key"; then
+            break
+        fi
+        warn "'$key' is not a known key name. Try again."
+    done
+    set_option hotkey key "$key"
+}
+
+choose_model() {
+    echo ""
+    echo "  ${BOLD}3. Speech model${RESET}"
+    if has_nvidia; then
+        note "NVIDIA GPU found: large-v3-turbo is fast and accurate on it."
+        choose "Which model?" 1 \
+            "large-v3-turbo on GPU (recommended)" \
+            "small.en on GPU (less VRAM, English only)" \
+            "small.en on CPU (no GPU use)"
+    else
+        note "No NVIDIA GPU found, so the model runs on the CPU."
+        choose "Which model?" 2 \
+            "base.en on CPU (fastest, English only)" \
+            "small.en on CPU (recommended, English only)" \
+            "medium.en on CPU (most accurate, slow)"
+    fi
+    local model=${REPLY%% *} device=cpu compute=int8
+    if [[ $REPLY == *"on GPU"* ]]; then
+        device=cuda
+        compute=float16
+    fi
+    set_option whisper model "$model"
+    set_option whisper device "$device"
+    set_option whisper compute_type "$compute"
+
+    if [[ $model == *.en ]]; then
+        set_option whisper language en
+    else
+        echo ""
+        echo "  ${BOLD}4. Language${RESET}"
+        ask "Spoken language code (en, de, fr, ...; 'auto' to detect)" "en"
+        [ "$REPLY" = auto ] && REPLY=""
+        set_option whisper language "$REPLY"
+    fi
+}
+
+# Interactive setup guide; writes $CONFIG
+setup_config() {
+    step "Setup guide"
     mkdir -p "$CONFIG_DIR"
 
-    if [ ! -f "$CONFIG_DIR/config.ini" ]; then
-        cp "$SCRIPT_DIR/config.example.ini" "$CONFIG_DIR/config.ini"
-        if ! has_nvidia; then
-            sed -i -e 's/^model = .*/model = small.en/' \
-                -e 's/^device = .*/device = cpu/' \
-                -e 's/^compute_type = .*/compute_type = int8/' "$CONFIG_DIR/config.ini"
+    if [ -f "$CONFIG" ]; then
+        if ! confirm "A config already exists at $CONFIG. Reconfigure it?" n; then
+            note "Keeping the existing config."
+            return
         fi
-        echo "Created config at $CONFIG_DIR/config.ini"
-    else
-        echo "Config already exists at $CONFIG_DIR/config.ini"
+        cp "$CONFIG" "$CONFIG.bak"
+        note "Backed up the old config to $CONFIG.bak"
     fi
+    cp "$SCRIPT_DIR/config.example.ini" "$CONFIG"
+
+    choose_hotkey
+
+    echo ""
+    echo "  ${BOLD}2. Recording mode${RESET}"
+    choose "How do you want to record?" 1 \
+        "Hold to talk (release to transcribe)" \
+        "Hold to talk, or tap once to start and tap again to stop"
+    case $REPLY in
+        *"tap once"*) set_option hotkey mode toggle ;;
+        *) set_option hotkey mode hold ;;
+    esac
+
+    choose_model
+
+    echo ""
+    echo "  ${BOLD}5. Output${RESET}: the text always goes to the clipboard."
+    if confirm "Also type it into the focused text field?" y; then
+        set_option behavior auto_type true
+    else
+        set_option behavior auto_type false
+    fi
+
+    echo ""
+    echo "  ${BOLD}6. On-screen indicator${RESET} (shows listening / transcribing)"
+    choose "Where should it appear?" 1 "Bottom of the screen" "Top of the screen" "Don't show it"
+    case $REPLY in
+        Bottom*) set_option overlay enabled true; set_option overlay position bottom ;;
+        Top*) set_option overlay enabled true; set_option overlay position top ;;
+        *) set_option overlay enabled false ;;
+    esac
+
+    echo ""
+    echo "    ${GREEN}Saved $CONFIG${RESET}"
+    note "Edit it any time, or re-run: ./install.sh --configure"
 }
 
 # Install systemd service
 install_service() {
-    echo ""
-    echo "Installing systemd user service..."
+    step "Installing the background service"
 
     mkdir -p "$SERVICE_DIR"
 
@@ -146,51 +390,58 @@ RestartSec=5
 WantedBy=graphical-session.target
 EOF2
 
-    echo "Created service at $SERVICE_DIR/soupawhisper.service"
-
-    # Reload and enable
     systemctl --user daemon-reload
     systemctl --user enable soupawhisper
-
-    echo ""
-    echo "Service installed! Commands:"
-    echo "  systemctl --user start soupawhisper   # Start"
-    echo "  systemctl --user stop soupawhisper    # Stop"
-    echo "  systemctl --user status soupawhisper  # Status"
-    echo "  journalctl --user -u soupawhisper -f  # Logs"
+    systemctl --user restart soupawhisper
+    note "Started. It also starts automatically when you log in."
+    note "The first start downloads the speech model, which can take a few minutes."
 }
 
-# Main
+restart_if_running() {
+    if systemctl --user is-active --quiet soupawhisper 2> /dev/null; then
+        systemctl --user restart soupawhisper
+        note "Restarted the service with the new settings."
+    fi
+}
+
 main() {
-    echo "==================================="
+    echo "${BOLD}==================================="
     echo "  SoupaWhisper Installer"
-    echo "==================================="
-    echo ""
+    echo "===================================${RESET}"
+
+    if $CONFIGURE_ONLY; then
+        setup_config
+        restart_if_running
+        exit 0
+    fi
 
     install_deps
     setup_input_permissions
     install_python
     setup_config
 
-    echo ""
-    read -p "Install as systemd service? [y/N] " -n 1 -r
-    echo ""
-
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
+    local service=false
+    step "Background service"
+    note "Runs SoupaWhisper in the background and starts it at login."
+    if confirm "Install and start it now?" y; then
         install_service
+        service=true
     fi
 
     echo ""
-    echo "==================================="
+    echo "${BOLD}==================================="
     echo "  Installation complete!"
-    echo "==================================="
+    echo "===================================${RESET}"
     echo ""
-    echo "To run manually:"
-    echo "  .venv/bin/python dictate.py"
+    echo "  Hotkey: hold ${BOLD}$(sed -n 's/^key = //p' "$CONFIG" | head -1)${RESET}, speak, release."
+    if $service; then
+        echo "  Logs:   journalctl --user -u soupawhisper -f"
+    else
+        echo "  Run:    $SCRIPT_DIR/.venv/bin/python $SCRIPT_DIR/dictate.py"
+    fi
+    echo "  Config: $CONFIG (or ./install.sh --configure)"
     echo ""
-    echo "Config: $CONFIG_DIR/config.ini"
-    echo "Hotkey: Right Ctrl (hold to record)"
-    echo "Exit:   Ctrl+C"
+    echo "  Log out and back in once so the 'input' group applies everywhere."
 }
 
 main "$@"
