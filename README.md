@@ -4,6 +4,18 @@ A simple push-to-talk voice dictation tool for Linux using faster-whisper. Hold 
 
 <p align="center"><img src="docs/overlay-flow.gif" alt="Overlay: listening with a live mic meter, transcribing, then the result" width="520"></p>
 
+## Quick install (Ubuntu)
+
+```bash
+git clone -b feat/wayland-overlay https://github.com/zudsniper/soupawhisper.git ~/soupawhisper
+cd ~/soupawhisper
+./install.sh
+```
+
+The installer asks for your password once (for system packages and keyboard access). It then walks you through a short setup: hotkey (pick one or just press it), hold or tap-to-toggle, speech model, auto-typing and overlay position. Finally it starts the background service. Log out and back in once afterwards.
+
+Change settings later with `./install.sh --configure`, or install with all defaults using `./install.sh --yes`.
+
 This fork adds:
 - **Wayland support** (tested on GNOME 49): the hotkey is read with evdev and text is typed through a uinput virtual keyboard, so it works in every app on X11 and Wayland, terminals included.
 - **On-screen overlay**: a small pill at the bottom of the screen that pulses with a live mic meter while you hold the key, spins while transcribing, then flashes the result. It never takes focus away from the field you're typing in.
@@ -40,9 +52,8 @@ Try the overlay without a microphone: `.venv/bin/python dictate.py --demo-overla
 ## Installation
 
 ```bash
-git clone https://github.com/zudsniper/soupawhisper.git
+git clone -b feat/wayland-overlay https://github.com/zudsniper/soupawhisper.git
 cd soupawhisper
-chmod +x install.sh
 ./install.sh
 ```
 
@@ -50,9 +61,9 @@ The installer will:
 1. Detect your package manager
 2. Install system dependencies
 3. Add a udev rule for `/dev/uinput` and add you to the `input` group (**log out and back in afterwards**)
-4. Create `.venv` with uv and install Python dependencies (CUDA wheels if an NVIDIA GPU is found)
-5. Set up the config file
-6. Optionally install as a systemd service
+4. Install uv if needed, create `.venv` and install Python dependencies (CUDA wheels if an NVIDIA GPU is found)
+5. Run a setup guide for the hotkey, recording mode, model, auto-typing and overlay, and write the config file
+6. Optionally install and start the systemd service
 
 ### Manual Installation
 
