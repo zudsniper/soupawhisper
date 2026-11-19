@@ -12,6 +12,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_DIR="$HOME/.config/soupawhisper"
 CONFIG="$CONFIG_DIR/config.ini"
 SERVICE_DIR="$HOME/.config/systemd/user"
+DESKTOP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+DESKTOP_FILE="$DESKTOP_DIR/io.github.zudsniper.SoupaWhisper.Settings.desktop"
 UDEV_RULE="/etc/udev/rules.d/80-soupawhisper-uinput.rules"
 SYS_PYTHON=/usr/bin/python3
 
@@ -312,6 +314,54 @@ choose_model() {
     fi
 }
 
+# Print "node.name<TAB>description" for each PipeWire microphone (no monitors)
+LIST_SOURCES_PY='
+import json, sys
+try:
+    objects = json.load(sys.stdin)
+except ValueError:
+    sys.exit(0)
+for obj in objects:
+    props = (obj.get("info") or {}).get("props") or {}
+    name = props.get("node.name") or ""
+    if props.get("media.class") != "Audio/Source" or not name:
+        continue
+    if name.endswith(".split") or ".monitor" in name or props.get("stream.monitor"):
+        continue
+    label = props.get("node.description") or props.get("node.nick") or name
+    print(name + "\t" + label.replace("\t", " "))
+'
+
+list_sources() {
+    command -v pw-dump &> /dev/null || return 0
+    timeout 5 pw-dump 2> /dev/null | "$SYS_PYTHON" -c "$LIST_SOURCES_PY" 2> /dev/null || true
+}
+
+choose_microphone() {
+    $ASSUME_YES && return  # keep the system default
+    local names=() labels=() name label
+    while IFS=$'\t' read -r name label; do
+        [ -n "$name" ] || continue
+        names+=("$name")
+        labels+=("$label")
+    done < <(list_sources)
+    [ ${#names[@]} -gt 0 ] || return 0  # nothing detected: keep the default
+
+    echo ""
+    echo "  ${BOLD}7. Microphone${RESET}"
+    note "The system default follows your sound settings. Pick one input to pin"
+    note "it, e.g. if the default is a webcam or a silent interface channel."
+    choose "Which input?" 1 "System default (recommended)" "${labels[@]}"
+    local i
+    for i in "${!labels[@]}"; do
+        if [ "$REPLY" = "${labels[$i]}" ]; then
+            set_option audio device "${names[$i]}"
+            return
+        fi
+    done
+    set_option audio device ""
+}
+
 # Interactive setup guide; writes $CONFIG
 setup_config() {
     step "Setup guide"
@@ -358,9 +408,12 @@ setup_config() {
         *) set_option overlay enabled false ;;
     esac
 
+    choose_microphone
+
     echo ""
     echo "    ${GREEN}Saved $CONFIG${RESET}"
-    note "Edit it any time, or re-run: ./install.sh --configure"
+    note "Change it any time in the settings window (Super+Comma),"
+    note "edit the file, or re-run: ./install.sh --configure"
 }
 
 # Install systemd service
@@ -397,6 +450,26 @@ EOF2
     note "The first start downloads the speech model, which can take a few minutes."
 }
 
+# App-grid entry for the settings window
+install_desktop_entry() {
+    local python="$SCRIPT_DIR/.venv/bin/python" settings="$SCRIPT_DIR/settings.py" entry
+    if [ ! -x "$python" ]; then
+        warn "No virtualenv at $SCRIPT_DIR/.venv yet; skipping the settings app entry."
+        return 0
+    fi
+    mkdir -p "$DESKTOP_DIR"
+    # Quote both paths for the Exec line; the quoted replacement keeps '&' literal
+    local exec_python="\"$python\"" exec_settings="\"$settings\""
+    entry=$(< "$SCRIPT_DIR/io.github.zudsniper.SoupaWhisper.Settings.desktop")
+    entry=${entry//@PYTHON@/"$exec_python"}
+    entry=${entry//@SETTINGS@/"$exec_settings"}
+    printf '%s\n' "$entry" > "$DESKTOP_FILE"
+    if command -v update-desktop-database &> /dev/null; then
+        update-desktop-database "$DESKTOP_DIR" &> /dev/null || true
+    fi
+    note "Added 'SoupaWhisper Settings' to the app grid ($DESKTOP_FILE)."
+}
+
 restart_if_running() {
     if systemctl --user is-active --quiet soupawhisper 2> /dev/null; then
         systemctl --user restart soupawhisper
@@ -411,6 +484,7 @@ main() {
 
     if $CONFIGURE_ONLY; then
         setup_config
+        install_desktop_entry
         restart_if_running
         exit 0
     fi
@@ -419,6 +493,7 @@ main() {
     setup_input_permissions
     install_python
     setup_config
+    install_desktop_entry
 
     local service=false
     step "Background service"
@@ -440,6 +515,7 @@ main() {
         echo "  Run:    $SCRIPT_DIR/.venv/bin/python $SCRIPT_DIR/dictate.py"
     fi
     echo "  Config: $CONFIG (or ./install.sh --configure)"
+    echo "  Open settings: Super+Comma, or search 'SoupaWhisper' in Activities"
     echo ""
     echo "  Log out and back in once so the 'input' group applies everywhere."
 }
