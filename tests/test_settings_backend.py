@@ -496,3 +496,16 @@ def test_constants():
     assert sb.CONFIG_PATH.name == "config.ini" and sb.CONFIG_PATH.parent.name == "soupawhisper"
     assert sb.EXAMPLE_PATH.exists()
     assert math.isfinite(sb.SILENCE_DBFS)
+
+
+def test_write_config_keeps_symlink(tmp_path):
+    real = tmp_path / "dotfiles" / "config.ini"
+    real.parent.mkdir()
+    real.write_text("[hotkey]\nkey = rightctrl\n")
+    link = tmp_path / "config.ini"
+    link.symlink_to(real)
+    values = sb.read_config(link)
+    values["hotkey"]["key"] = "f12"
+    sb.write_config(values, link)
+    assert link.is_symlink()
+    assert "key = f12" in real.read_text()

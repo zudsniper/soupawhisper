@@ -156,7 +156,7 @@ class HotkeyListener:
             return
         if event.type != ecodes.EV_KEY or event.value == 2:  # ignore autorepeat
             return
-        if event.value == 1:
+        if event.value == 1 and not self.held:  # while dictating, any key is a chord/cancel
             self._check_combo(event.code)
         if event.code in MODIFIER_KEYS:
             if event.value == 1:

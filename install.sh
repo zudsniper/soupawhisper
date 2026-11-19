@@ -342,6 +342,11 @@ choose_microphone() {
     local names=() labels=() name label
     while IFS=$'\t' read -r name label; do
         [ -n "$name" ] || continue
+        # Labels are matched back to names, so make duplicates unique
+        local base=$label n=2
+        while printf '%s\n' "${labels[@]}" | grep -Fxq -- "$label"; do
+            label="$base ($n)"; n=$((n + 1))
+        done
         names+=("$name")
         labels+=("$label")
     done < <(list_sources)
@@ -457,9 +462,15 @@ install_desktop_entry() {
         warn "No virtualenv at $SCRIPT_DIR/.venv yet; skipping the settings app entry."
         return 0
     fi
+    case $SCRIPT_DIR in
+        *[\"\`\$\\]*)
+            warn "The install path contains \", \`, \$ or \\, which a desktop entry can't quote; skipping it."
+            return 0 ;;
+    esac
     mkdir -p "$DESKTOP_DIR"
-    # Quote both paths for the Exec line; the quoted replacement keeps '&' literal
-    local exec_python="\"$python\"" exec_settings="\"$settings\""
+    # Quote both paths for the Exec line ('%' is a field code there, so double it);
+    # the quoted replacement keeps '&' literal
+    local exec_python="\"${python//%/%%}\"" exec_settings="\"${settings//%/%%}\""
     entry=$(< "$SCRIPT_DIR/io.github.zudsniper.SoupaWhisper.Settings.desktop")
     entry=${entry//@PYTHON@/"$exec_python"}
     entry=${entry//@SETTINGS@/"$exec_settings"}

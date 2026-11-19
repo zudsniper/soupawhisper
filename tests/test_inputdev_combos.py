@@ -167,12 +167,19 @@ def test_other_key_while_held_is_chord(rec):
     assert rec.calls == ["press", "chord", "release"]
 
 
-def test_combo_while_dictation_key_held_is_chord(rec):
-    """With a non-modifier dictation key, the combo fires and still cancels."""
+def test_combo_while_dictation_key_held_is_only_chord(rec):
+    """While dictating, the settings combo just cancels; it doesn't open settings."""
     lis = make(rec, hotkey=ecodes.KEY_F12)
     feed(lis, key(ecodes.KEY_F12, DOWN), key(ecodes.KEY_LEFTMETA, DOWN),
          key(ecodes.KEY_COMMA, DOWN))
-    assert rec.calls == ["press", "chord", "settings", "chord"]
+    assert rec.calls == ["press", "chord", "chord"]
+
+
+def test_combo_works_after_dictation_key_released(rec):
+    lis = make(rec, hotkey=ecodes.KEY_F12)
+    feed(lis, key(ecodes.KEY_F12, DOWN), key(ecodes.KEY_F12, UP),
+         key(ecodes.KEY_LEFTMETA, DOWN), key(ecodes.KEY_COMMA, DOWN))
+    assert rec.calls == ["press", "release", "settings"]
 
 
 def test_dictation_key_counts_as_modifier(rec):

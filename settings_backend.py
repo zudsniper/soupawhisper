@@ -197,7 +197,7 @@ def _atomic_write(path: Path, text: str, mode: int) -> None:
 
 def write_config(values: dict[str, dict[str, str]], path: Path = CONFIG_PATH) -> None:
     """Apply changed values in place; back up the old file to `<path>.bak`."""
-    path = Path(path)
+    path = Path(path).resolve()  # keep a symlinked (dotfiles) config a symlink
     path.parent.mkdir(parents=True, exist_ok=True)
     existing = _read_text(path) if path.exists() else None
     base = existing if existing is not None else (_read_text(EXAMPLE_PATH) or "")

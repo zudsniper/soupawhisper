@@ -238,6 +238,7 @@ class SettingsView(Gtk.Box):
             self.show_message(f"Could not save {self.config_path}: {e}", Gtk.MessageType.ERROR)
             return
         self._busy = True
+        self.stack.set_sensitive(False)  # edits made now would be lost on reload
         self._changed()
         custom = self.config_path.resolve() != backend.CONFIG_PATH.resolve()
 
@@ -256,7 +257,8 @@ class SettingsView(Gtk.Box):
         self.revert()
         self.show_message(message or "Saved.", Gtk.MessageType.INFO if ok else Gtk.MessageType.WARNING)
         self.refresh_status()
-        if on_done:
+        self.stack.set_sensitive(True)
+        if on_done and ok:  # on failure stay open so the warning is visible
             on_done()
         return False
 
@@ -480,7 +482,7 @@ class SettingsView(Gtk.Box):
         modes.pack_start(hold, False, False, 0)
         modes.pack_start(toggle, False, False, 0)
         self._loaders.append(
-            lambda: (toggle if self.working["hotkey"]["mode"] == "toggle" else hold).set_active(True))
+            lambda: (toggle if self.working["hotkey"]["mode"].lower() == "toggle" else hold).set_active(True))
         hold.connect("toggled", lambda w: w.get_active() and self._set("hotkey", "mode", "hold"))
         toggle.connect("toggled", lambda w: w.get_active() and self._set("hotkey", "mode", "toggle"))
         mode_row = _row("Mode", modes, "Hold to talk. Toggle also lets a quick tap start hands-free recording.")
@@ -489,7 +491,7 @@ class SettingsView(Gtk.Box):
                         "Shorter presses are ignored.")
         long_row = _row("Tap length (s)", self._spin("behavior", "long_press", 0.1, 2.0, 0.05, 2),
                         "Toggle mode: presses shorter than this count as a tap.")
-        self._watchers.append(lambda: long_row.set_sensitive(self.working["hotkey"]["mode"] == "toggle"))
+        self._watchers.append(lambda: long_row.set_sensitive(self.working["hotkey"]["mode"].lower() == "toggle"))
 
         self.combo_row = _row("Open settings shortcut", self._entry("hotkey", "settings_key", "disabled", 18))
         self._watchers.append(self._watch_combo)
@@ -704,6 +706,8 @@ class SettingsWindow(Gtk.ApplicationWindow):
 
     def _on_delete(self, *_):
         view = self.view
+        if view._busy:  # a save/restart is finishing; its result closes or reports
+            return True
         if not view.dirty:
             return False
         dialog = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.QUESTION,

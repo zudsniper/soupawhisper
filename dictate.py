@@ -12,6 +12,7 @@ import importlib.util
 import math
 import os
 import random
+import shutil
 import signal
 import subprocess
 import sys
@@ -50,7 +51,7 @@ FALLBACK_MODEL = ("small.en", "cpu", "int8")
 
 
 def load_config():
-    config = configparser.ConfigParser()
+    config = configparser.ConfigParser(interpolation=None)
 
     if CONFIG_PATH.exists():
         config.read(CONFIG_PATH)
@@ -429,9 +430,14 @@ class SettingsLauncher:
             if now - self.last < SETTINGS_DEBOUNCE:
                 return
             self.last = now
+        # A transient scope moves the window out of soupawhisper.service's
+        # cgroup, otherwise "Save & Restart" (or Restart=on-failure) kills it
+        command = [sys.executable, str(SETTINGS_SCRIPT)]
+        if shutil.which("systemd-run"):
+            command = ["systemd-run", "--user", "--scope", "--collect", "--quiet", *command]
         try:
             process = subprocess.Popen(
-                [sys.executable, str(SETTINGS_SCRIPT)],
+                command,
                 cwd=str(SETTINGS_SCRIPT.parent),
                 env=settings_env(),
                 stdin=subprocess.DEVNULL,
