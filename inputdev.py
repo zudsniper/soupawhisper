@@ -27,6 +27,24 @@ KEY_ALIASES = {
     "menu": "compose",
 }
 
+# Modifier keys tracked for shortcut combos (e.g. super+comma)
+MODIFIER_KEYS = {
+    ecodes.KEY_LEFTMETA: "super",
+    ecodes.KEY_RIGHTMETA: "super",
+    ecodes.KEY_LEFTCTRL: "ctrl",
+    ecodes.KEY_RIGHTCTRL: "ctrl",
+    ecodes.KEY_LEFTALT: "alt",
+    ecodes.KEY_RIGHTALT: "alt",
+    ecodes.KEY_LEFTSHIFT: "shift",
+    ecodes.KEY_RIGHTSHIFT: "shift",
+}
+MODIFIER_ALIASES = {
+    "super": "super", "meta": "super", "win": "super", "windows": "super", "logo": "super",
+    "ctrl": "ctrl", "control": "ctrl",
+    "alt": "alt",
+    "shift": "shift",
+}
+
 
 def resolve_key(name):
     """Map a config key name (e.g. 'rightctrl', 'f12') to an evdev keycode."""
@@ -38,24 +56,58 @@ def resolve_key(name):
     return code
 
 
+def parse_combo(text):
+    """
+    Parse a shortcut like 'super+comma' into (frozenset({'super'}), KEY_COMMA).
+
+    Needs at least one modifier (super, ctrl, alt, shift; meta/win and control
+    are accepted too) and exactly one non-modifier key. Returns None for an
+    empty or invalid combo.
+    """
+    parts = [p.strip().lower() for p in (text or "").split("+")]
+    if len(parts) < 2 or any(not p for p in parts):
+        return None
+    *mod_parts, key_part = parts
+    mods = set()
+    for part in mod_parts:
+        if part not in MODIFIER_ALIASES:
+            return None
+        mods.add(MODIFIER_ALIASES[part])
+    try:
+        keycode = resolve_key(key_part)
+    except ValueError:
+        return None
+    if keycode in MODIFIER_KEYS:
+        return None
+    return frozenset(mods), keycode
+
+
 class HotkeyListener:
     """
-    Watches every keyboard that has `keycode` and reports hold/release.
+    Watches every keyboard that has `keycode` (or a combo key) and reports hold/release.
 
     Devices are read non-exclusively, so the key keeps its normal function.
     If any other key goes down while the hotkey is held, `on_chord` fires so
     the caller can tell a shortcut (Ctrl+C) apart from push-to-talk.
+
+    `combos` maps (frozenset of modifier names, keycode) to a callback, e.g.
+    {(frozenset({"super"}), KEY_COMMA): open_settings}. It fires on key-down
+    when exactly those modifiers are held (on any watched keyboard).
     """
 
-    def __init__(self, keycode, on_press, on_release, on_chord):
+    def __init__(self, keycode, on_press, on_release, on_chord, combos=None):
         self.keycode = keycode
         self.on_press = on_press
         self.on_release = on_release
         self.on_chord = on_chord
+        self.combos = dict(combos or {})
         self.held = False
+        self.mods_down = set()  # keycodes of modifier keys currently held
         self.selector = selectors.DefaultSelector()
         self.devices = {}
         self.denied = set()
+        # Open keyboards that have the dictation key or any shortcut key
+        self.watched_keys = {keycode} | {key for _, key in self.combos}
 
     def _scan(self):
         for path in evdev.list_devices():
@@ -65,7 +117,7 @@ class HotkeyListener:
             try:
                 dev = evdev.InputDevice(path)
                 keys = dev.capabilities().get(ecodes.EV_KEY, [])
-                if dev.name == VIRTUAL_KEYBOARD_NAME or self.keycode not in keys:
+                if dev.name == VIRTUAL_KEYBOARD_NAME or not self.watched_keys & set(keys):
                     dev.close()
                     continue
             except PermissionError:
@@ -93,6 +145,7 @@ class HotkeyListener:
 
     def _lost_release(self):
         """A key-up we may never see (unplug, dropped events): treat as a chord/cancel."""
+        self.mods_down.clear()
         if self.held:
             self.held = False
             self.on_chord()
@@ -103,6 +156,13 @@ class HotkeyListener:
             return
         if event.type != ecodes.EV_KEY or event.value == 2:  # ignore autorepeat
             return
+        if event.value == 1:
+            self._check_combo(event.code)
+        if event.code in MODIFIER_KEYS:
+            if event.value == 1:
+                self.mods_down.add(event.code)
+            else:
+                self.mods_down.discard(event.code)
         if event.code == self.keycode:
             if event.value == 1 and not self.held:
                 self.held = True
@@ -112,6 +172,19 @@ class HotkeyListener:
                 self.on_release()
         elif event.value == 1 and self.held:
             self.on_chord()
+
+    def held_modifiers(self):
+        return frozenset(MODIFIER_KEYS[code] for code in self.mods_down)
+
+    def _check_combo(self, code):
+        if not self.combos or code in MODIFIER_KEYS:
+            return
+        callback = self.combos.get((self.held_modifiers(), code))
+        if callback is not None:
+            try:
+                callback()
+            except Exception as e:  # never let a shortcut break push-to-talk
+                print(f"Shortcut handler error: {e}")
 
     def run(self):
         self._scan()

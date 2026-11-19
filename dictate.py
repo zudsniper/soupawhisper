@@ -6,6 +6,7 @@ Works on X11 and Wayland (hotkey and typing go through evdev/uinput).
 """
 
 import argparse
+import builtins
 import configparser
 import importlib.util
 import math
@@ -21,6 +22,9 @@ from pathlib import Path
 
 import numpy as np
 
+# overlay forces GDK_BACKEND=x11 for itself; the settings window must not inherit that
+_USER_GDK_BACKEND = os.environ.get("GDK_BACKEND")
+
 from overlay import Overlay, set_clipboard  # sets GDK_BACKEND before gi loads
 from gi.repository import GLib, Gtk  # noqa: E402
 
@@ -30,6 +34,16 @@ __version__ = "0.2.0"
 
 # Load configuration
 CONFIG_PATH = Path.home() / ".config" / "soupawhisper" / "config.ini"
+SETTINGS_SCRIPT = Path(__file__).resolve().parent / "settings.py"
+
+_PRINT_LOCK = threading.Lock()
+
+
+def print(*args, **kwargs):  # noqa: A001
+    """Thread-safe print: the model loader and listener threads log concurrently."""
+    with _PRINT_LOCK:
+        builtins.print(*args, **kwargs)
+SETTINGS_DEBOUNCE = 1.0  # seconds between settings-shortcut launches
 SAMPLE_RATE = 16000
 MAX_RECORD_SECONDS = 120  # safety net if a key-up is ever lost
 FALLBACK_MODEL = ("small.en", "cpu", "int8")
@@ -48,6 +62,7 @@ def load_config():
         "language": config.get("whisper", "language", fallback="en").strip() or None,
         "beam_size": config.getint("whisper", "beam_size", fallback=5),
         "key": config.get("hotkey", "key", fallback="rightctrl"),
+        "settings_key": config.get("hotkey", "settings_key", fallback="super+comma").strip(),
         "min_hold": config.getfloat("hotkey", "min_hold", fallback=0.25),
         "mode": config.get("hotkey", "mode", fallback="hold").strip().lower(),
         "long_press": config.getfloat("behavior", "long_press", fallback=0.4),
@@ -386,6 +401,66 @@ class Dictation:
         notify("Copied!", text[:100] + ("..." if len(text) > 100 else ""), "emblem-ok-symbolic", 3000)
 
 
+def settings_env():
+    """Environment for the settings window: without the overlay's forced GDK_BACKEND."""
+    env = os.environ.copy()
+    if _USER_GDK_BACKEND is None:
+        env.pop("GDK_BACKEND", None)
+    else:
+        env["GDK_BACKEND"] = _USER_GDK_BACKEND
+    return env
+
+
+def exec_settings():
+    """Replace this process with the settings window (dictate.py --settings)."""
+    os.execve(sys.executable, [sys.executable, str(SETTINGS_SCRIPT)], settings_env())
+
+
+class SettingsLauncher:
+    """Opens the settings window from the hotkey thread without blocking it."""
+
+    def __init__(self):
+        self.last = -SETTINGS_DEBOUNCE
+        self.lock = threading.Lock()
+
+    def __call__(self):
+        with self.lock:
+            now = time.monotonic()
+            if now - self.last < SETTINGS_DEBOUNCE:
+                return
+            self.last = now
+        try:
+            process = subprocess.Popen(
+                [sys.executable, str(SETTINGS_SCRIPT)],
+                cwd=str(SETTINGS_SCRIPT.parent),
+                env=settings_env(),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except OSError as e:
+            print(f"Cannot open settings: {e}")
+            return
+        print("Opening settings")
+        # Reap it when it exits so no zombie is left behind
+        threading.Thread(target=process.wait, daemon=True).start()
+
+
+def settings_combos():
+    """The [hotkey] settings_key combo as a HotkeyListener `combos` dict."""
+    text = CONFIG["settings_key"]
+    if not text:
+        print("Settings shortcut: disabled")
+        return {}
+    combo = inputdev.parse_combo(text)
+    if combo is None:
+        print(f"Warning: invalid settings_key '{text}' (e.g. super+comma); shortcut disabled")
+        return {}
+    print(f"Settings shortcut: {text}")
+    return {combo: SettingsLauncher()}
+
+
 def check_dependencies():
     """Check that required system commands are available."""
     if subprocess.run(["which", "arecord"], capture_output=True).returncode != 0:
@@ -442,7 +517,11 @@ def main():
     )
     parser.add_argument("--test-file", metavar="AUDIO", help="transcribe a file and exit")
     parser.add_argument("--demo-overlay", action="store_true", help="show every overlay state and exit")
+    parser.add_argument("--settings", action="store_true", help="open the settings window")
     args = parser.parse_args()
+
+    if args.settings:
+        exec_settings()
 
     ensure_cuda_libs()
 
@@ -485,6 +564,7 @@ def main():
         on_press=dictation.on_press,
         on_release=dictation.on_release,
         on_chord=dictation.on_chord,
+        combos=settings_combos(),
     ).start()
 
     Gtk.main()
