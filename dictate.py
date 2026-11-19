@@ -58,6 +58,7 @@ def load_config():
         "overlay": config.getboolean("overlay", "enabled", fallback=True),
         "overlay_position": config.get("overlay", "position", fallback="bottom"),
         "overlay_offset": config.getint("overlay", "offset", fallback=72),
+        "audio_device": config.get("audio", "device", fallback="").strip(),
     }
 
 
@@ -159,11 +160,17 @@ class Recorder:
 
     def start(self):
         self.chunks = []
-        # arecord talks to PipeWire/Pulse through the ALSA plugin
+        # arecord talks to PipeWire/Pulse through the ALSA plugin; these
+        # variables pin it to one input instead of the system default
+        env = os.environ.copy()
+        if CONFIG["audio_device"]:
+            env["PIPEWIRE_NODE"] = CONFIG["audio_device"]
+            env["PULSE_SOURCE"] = CONFIG["audio_device"]
         self.process = subprocess.Popen(
             ["arecord", "-q", "-f", "S16_LE", "-r", str(SAMPLE_RATE), "-c", "1", "-t", "raw"],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
+            env=env,
         )
         self.thread = threading.Thread(
             target=self._read, args=(self.process, self.chunks), daemon=True
@@ -249,6 +256,7 @@ class Dictation:
         self.model_loaded.set()
         print("Model loaded. Ready for dictation!")
         print(f"Hold [{CONFIG['key']}] to record, release to transcribe.")
+        print(f"Microphone: {CONFIG['audio_device'] or 'system default input'}")
         if CONFIG["mode"] == "toggle":
             print(f"Or tap [{CONFIG['key']}] to start, tap again to stop.")
 
