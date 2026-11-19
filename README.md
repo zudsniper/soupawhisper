@@ -14,7 +14,7 @@ cd ~/soupawhisper
 
 The installer asks for your password once (for system packages and keyboard access). It then walks you through a short setup: hotkey (pick one or just press it), hold or tap-to-toggle, speech model, auto-typing and overlay position. Finally it starts the background service. Log out and back in once afterwards.
 
-Change settings later with `./install.sh --configure`, or install with all defaults using `./install.sh --yes`.
+Change settings later in the settings window (**Super+Comma**, see [Settings](#settings)) or with `./install.sh --configure`, or install with all defaults using `./install.sh --yes`.
 
 This fork adds:
 - **Wayland support** (tested on GNOME 49): the hotkey is read with evdev and text is typed through a uinput virtual keyboard, so it works in every app on X11 and Wayland, terminals included.
@@ -62,8 +62,9 @@ The installer will:
 2. Install system dependencies
 3. Add a udev rule for `/dev/uinput` and add you to the `input` group (**log out and back in afterwards**)
 4. Install uv if needed, create `.venv` and install Python dependencies (CUDA wheels if an NVIDIA GPU is found)
-5. Run a setup guide for the hotkey, recording mode, model, auto-typing and overlay, and write the config file
-6. Optionally install and start the systemd service
+5. Run a setup guide for the hotkey, recording mode, model, auto-typing, overlay and microphone, and write the config file
+6. Add a *SoupaWhisper Settings* entry to the app grid
+7. Optionally install and start the systemd service
 
 ### Manual Installation
 
@@ -90,7 +91,26 @@ With `--extra gpu`, `nvidia-cublas-cu12` and `nvidia-cudnn-cu12` are installed i
 - Release to transcribe (*Transcribing* spinner) → copies to clipboard and types into active input
 - Pressing another key while holding (e.g. Ctrl+C), or a tap shorter than `min_hold`, cancels
 - Prefer hands-free? Set `mode = toggle` under `[hotkey]`: a quick tap starts recording, another tap stops it (holding still works)
+- Press **Super+Comma** to open the settings window
 - Press **Ctrl+C** to quit (when running manually)
+
+## Settings
+
+<p align="center"><img src="docs/settings.png" alt="SoupaWhisper Settings, Microphone page" width="640"></p>
+
+Open it with any of:
+- **Super+Comma** while SoupaWhisper is running (change or disable it with `settings_key` under `[hotkey]`)
+- *SoupaWhisper Settings* in the app grid / Activities search
+- `.venv/bin/python dictate.py --settings`
+
+Pages:
+- **Microphone**: pick the input to record from, with a live level meter. *Auto-detect* asks you to speak for 3 seconds and picks the input that heard you.
+- **Hotkey**: the dictation key (press *Change…* and then the key), hold or tap-to-toggle, `min_hold`, `long_press`, and the settings shortcut.
+- **Transcription**: model, GPU or CPU, compute type, language and beam size.
+- **Behavior**: auto-typing, trailing space, typing delay, notifications and the overlay.
+- **Status**: GPU, session type, keyboard and `/dev/uinput` access, the service state, and how to fix anything that's missing.
+
+*Save & Restart* writes `~/.config/soupawhisper/config.ini` (keeping your comments, previous version in `config.ini.bak`) and restarts the service.
 
 ## Run as a systemd Service
 
@@ -112,7 +132,7 @@ journalctl --user -u soupawhisper -f    # View logs
 
 ## Configuration
 
-Edit `~/.config/soupawhisper/config.ini`. See [`config.example.ini`](config.example.ini) for every option: model, device, language, hotkey, `min_hold`, auto-type, overlay position.
+Use the [settings window](#settings), or edit `~/.config/soupawhisper/config.ini`. See [`config.example.ini`](config.example.ini) for every option: model, device, language, hotkey, `min_hold`, settings shortcut, auto-type, overlay position, and the microphone (`device` under `[audio]`: empty means the system default input, or a PipeWire/Pulse source name to pin one).
 
 Create the config directory and file if it doesn't exist:
 ```bash
@@ -130,6 +150,14 @@ arecord -l
 # Test recording
 arecord -d 3 test.wav && aplay test.wav
 ```
+
+**"No speech detected" although you spoke:** the wrong input is probably recording (e.g. an unused interface channel or a webcam). Check the level in the log:
+```bash
+journalctl --user -u soupawhisper -n 20 | grep peak   # "Captured 2.1s, peak -62 dBFS"
+```
+A peak below about -45 dBFS means near silence. Open Settings → Microphone, speak, and pick the input whose meter moves (or use *Auto-detect*). This sets `device` under `[audio]`.
+
+**Settings shortcut does nothing:** it is read by the running service, so check `journalctl --user -u soupawhisper | grep "Settings shortcut"`. It needs the same `input` group access as the hotkey, and the modifiers must match exactly (Super+Shift+Comma does not count as Super+Comma).
 
 **Hotkey does nothing / "No readable keyboard found":**
 ```bash
