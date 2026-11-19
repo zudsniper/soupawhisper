@@ -20,7 +20,7 @@ import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 gi.require_version("Pango", "1.0")
-from gi.repository import Gdk, GLib, Gtk, Pango  # noqa: E402
+from gi.repository import Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
 import settings_backend as backend  # noqa: E402
 
@@ -665,8 +665,9 @@ def _status_items(s):
     if s.in_input_group:
         items.append((True, "Keyboard access", "You are in the input group, so the hotkey can be read."))
     elif s.input_group_pending:
-        items.append((False, "Keyboard access needs a re-login",
-                      "You were added to the input group. Log out and back in to finish."))
+        # The service is started via `sg input`, so it already has access
+        items.append((True, "Keyboard access (re-login pending)",
+                      "The service already has access. Log out and back in once to finish setup."))
     else:
         items.append((False, "No keyboard access",
                       "Run ./install.sh, or: sudo usermod -aG input $USER, then log out and back in."))
@@ -730,6 +731,7 @@ class SettingsApp(Gtk.Application):
 
     def do_startup(self):
         Gtk.Application.do_startup(self)
+        follow_color_scheme()
         _install_css()
         for sig in (signal.SIGINT, signal.SIGTERM):
             GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, sig, self._on_signal)
@@ -756,6 +758,91 @@ class SettingsApp(Gtk.Application):
         return GLib.SOURCE_REMOVE
 
 
+# ---- follow the system light/dark preference ------------------------------
+
+PORTAL_BUS = "org.freedesktop.portal.Desktop"
+PORTAL_PATH = "/org/freedesktop/portal/desktop"
+PORTAL_IFACE = "org.freedesktop.portal.Settings"
+_color_scheme_refs = []  # keep the proxy / GSettings alive so change signals keep firing
+
+
+BUILTIN_DARK_THEMES = {"Adwaita", "HighContrast"}  # compiled into GTK 3 with a dark variant
+
+
+def _theme_dirs(name):
+    data_dirs = [GLib.get_user_data_dir(), *GLib.get_system_data_dirs()]
+    return [Path(GLib.get_home_dir()) / ".themes" / name] + [Path(d) / "themes" / name for d in data_dirs]
+
+
+def _has_dark_variant(name):
+    """True if GTK 3 can load a dark variant of theme `name`."""
+    if name in BUILTIN_DARK_THEMES or name.endswith("-dark"):
+        return True
+    return any((d / "gtk-3.0" / "gtk-dark.css").exists() or Path(f"{d}-dark", "gtk-3.0").is_dir()
+               for d in _theme_dirs(name))
+
+
+def _apply_dark(dark):
+    settings = Gtk.Settings.get_default()
+    settings.set_property("gtk-application-prefer-dark-theme", dark)
+    # A theme without a dark variant (or one that isn't installed, which GTK
+    # silently replaces with light Adwaita) would ignore the preference.
+    if dark and not _has_dark_variant(settings.props.gtk_theme_name or ""):
+        settings.set_property("gtk-theme-name", "Adwaita")
+
+
+def _portal_color_scheme():
+    """XDG portal value (0 no preference, 1 dark, 2 light) and its proxy, or (None, None)."""
+    try:
+        proxy = Gio.DBusProxy.new_for_bus_sync(
+            Gio.BusType.SESSION, Gio.DBusProxyFlags.DO_NOT_AUTO_START, None,
+            PORTAL_BUS, PORTAL_PATH, PORTAL_IFACE, None)
+        reply = proxy.call_sync("ReadOne", GLib.Variant("(ss)", ("org.freedesktop.appearance", "color-scheme")),
+                                Gio.DBusCallFlags.NONE, 1000, None)
+    except GLib.Error:
+        return None, None
+    value = reply.unpack()[0]
+    return (value if isinstance(value, int) else None), proxy
+
+
+def _on_portal_changed(_proxy, _sender, signal, params):
+    if signal != "SettingChanged":
+        return
+    namespace, key, value = params.unpack()
+    if namespace == "org.freedesktop.appearance" and key == "color-scheme":
+        _apply_dark(value == 1)
+
+
+def _gnome_settings():
+    """org.gnome.desktop.interface GSettings if it has color-scheme (GNOME 42+), else None."""
+    source = Gio.SettingsSchemaSource.get_default()
+    schema = source.lookup("org.gnome.desktop.interface", True) if source else None
+    if schema is None or not schema.has_key("color-scheme"):
+        return None
+    return Gio.Settings.new("org.gnome.desktop.interface")
+
+
+def follow_color_scheme():
+    """Use the dark theme variant when the desktop prefers dark, and track changes.
+
+    GTK 3 only honours the gtk-theme name, not the newer "prefer dark" switch
+    that GNOME, KDE and others publish through the XDG settings portal.
+    """
+    value, proxy = _portal_color_scheme()
+    if proxy is not None and value is not None:
+        _apply_dark(value == 1)
+        proxy.connect("g-signal", _on_portal_changed)
+        _color_scheme_refs.append(proxy)
+        return
+    settings = _gnome_settings()
+    if settings is not None:
+        def sync(*_args):
+            _apply_dark(settings.get_string("color-scheme") == "prefer-dark")
+        sync()
+        settings.connect("changed::color-scheme", sync)
+        _color_scheme_refs.append(settings)
+
+
 def _install_css():
     provider = Gtk.CssProvider()
     provider.load_from_data(CSS)
@@ -765,6 +852,7 @@ def _install_css():
 
 def screenshot(path, config_path, page="mic", settle_ms=2500):
     """Render one page offscreen (never mapped on screen) and save it as PNG."""
+    follow_color_scheme()
     _install_css()
     view = SettingsView(config_path)
     view.header.set_show_close_button(False)
